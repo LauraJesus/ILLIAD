@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from MDAnalysis.analysis import distances
 import os
-
+//NAO TERMINADA
 def analisar_distancias(caminho_pdb, lista_pares_atomicos):
     nomeArquivo = "traj_w_nj_m_c_rtt.pdb"
     nomePasta = "teste_dados"
