@@ -4,6 +4,7 @@ import MDAnalysis as mda
 from MDAnalysis.lib.distances import calc_angles, calc_dihedrals
 from MDAnalysis.analysis import distances as mda_distances
 import argparse
+import illiad_db
 
 def _is_atom_index(token):
     """Returns True if token is a pure integer (atom index)."""
@@ -113,6 +114,11 @@ def parse_groups_file(filename, u):
     return configs
 
 
+def _describe_atoms(u, indices):
+    """Readable description of an angle/dihedral, e.g. 'CMB O0R (12) - SEH C08 (197)'."""
+    return " - ".join(f"{a.resname} {a.name} ({a.id})" for a in u.atoms[indices])
+
+
 # ─────────────────────────────────────────────
 # Frequency of occurrence (histogram)
 # ─────────────────────────────────────────────
@@ -120,6 +126,7 @@ def write_histogram(path, results, label, lo, hi, width):
     """
     Writes the frequency of occurrence of each angle/dihedral in bins of `width` degrees
     covering [lo, hi]. One Count and one Freq(%) column per angle/dihedral.
+    Returns the bin edges and, per angle/dihedral, its (counts, freqs).
     """
     edges = np.arange(lo, hi, width)
     edges = np.append(edges, hi)   # last bin is narrower when width does not divide the range
@@ -144,6 +151,8 @@ def write_histogram(path, results, label, lo, hi, width):
                 row += f" {counts[b]:16d} {freqs[b]:18.2f}"
             f.write(row + "\n")
 
+    return edges, columns
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -162,6 +171,9 @@ def main():
                         help="Time between frames (ps). Frame i is at time i*dt. "
                              "Without it, the trajectory time is used (for multi-model "
                              "PDBs that is MDAnalysis' 1 ps default, i.e. the frame index)")
+    parser.add_argument("--db",
+                        help="SQLite file to also store the results in (created if missing; "
+                             "each run is added to it)")
     args = parser.parse_args()
 
     if args.bin_width <= 0:
@@ -233,6 +245,7 @@ def main():
 
     print(f"Processing {len(u.trajectory)} frames...")
     n_frames = 0
+    frame_times = []
 
     for ts in u.trajectory:
         time = ts.frame * args.dt if args.dt is not None else ts.time
@@ -241,6 +254,7 @@ def main():
         if args.end >= 0 and time > args.end:
             break
         n_frames += 1
+        frame_times.append(time)
 
         # ── Per-atom and group distances ───────────────────────────────────────
         for other_res, s in sel.items():
@@ -305,6 +319,9 @@ def main():
         avg = total / n
         return avg, np.sqrt(max(total_sq / n - avg * avg, 0.0))
 
+    # rows also kept for --db: (resname, id1, label1, id2, label2, dist, sigma, frequency)
+    atom_rows, group_rows = [], []
+
     # keys are ordered ref-name-major, and both name lists come sorted from
     # np.unique, so iterating the keys in order gives rows sorted by (ref, other)
     for other_res, s in sel.items():
@@ -316,6 +333,7 @@ def main():
             avg, sd = _mean_std(n, s['sum'][key], s['sumsq'][key])
             id1  = ref_atom_ids.get(ref_aname, 0)
             id2  = other_atom_ids[other_res].get(oth_aname, 0)
+            atom_rows.append((other_res, id1, ref_aname, id2, oth_aname, avg, sd, n))
             res_files[other_res].write(
                 f"{id1:4d} {ref_aname:>8s} {id2:4d} {oth_aname:>8s} "
                 f"{avg:8.3f} {sd:9.3f} {n:10d}\n")
@@ -342,9 +360,12 @@ def main():
                     # integer ids from types dict (order of appearance in groups file)
                     ni    = types.get(ref_name,  {}).get(ref_grp, 0)
                     nj    = types.get(other_res, {}).get(oth_grp, 0)
+                    group_rows.append((other_res, ni, ref_grp, nj, oth_grp, avg, sd, n))
                     f.write(
                         f"{ni:4d} {ref_grp:>8s} {nj:4d} {oth_grp:>8s} "
                         f"{avg:8.3f} {sd:9.3f} {n:10d}\n")
+
+    geometries = []   # angle/dihedral results for --db
 
    # ── Output 3: angle statistics ────────────────────────────────────────────
     if configs['angles']:
@@ -368,8 +389,10 @@ def main():
         print(f"Angles averages saved to: {path_avg}")
 
         path_hist = f"{prefix}_angles_hist.dat"
-        write_histogram(path_hist, angle_results, "Angle", 0, 180, args.bin_width)
+        edges, hist = write_histogram(path_hist, angle_results, "Angle", 0, 180, args.bin_width)
         print(f"Angles frequency of occurrence saved to: {path_hist}")
+        geometries.append({'kind': 'angle', 'atoms': [_describe_atoms(u, ix) for ix in configs['angles']],
+                           'series': angle_results, 'edges': edges, 'hist': hist})
 
 
     # ── Output 4: dihedral statistics ─────────────────────────────────────────
@@ -395,8 +418,16 @@ def main():
         print(f"Dihedrals frame-by-frame saved to: {path_avg}")
 
         path_hist = f"{prefix}_dihedrals_hist.dat"
-        write_histogram(path_hist, dihedral_results, "Dihedral", -180, 180, args.bin_width)
+        edges, hist = write_histogram(path_hist, dihedral_results, "Dihedral", -180, 180, args.bin_width)
         print(f"Dihedrals frequency of occurrence saved to: {path_hist}")
+        geometries.append({'kind': 'dihedral', 'atoms': [_describe_atoms(u, ix) for ix in configs['dihedrals']],
+                           'series': dihedral_results, 'edges': edges, 'hist': hist})
+
+    # ── Output 5: SQLite database ─────────────────────────────────────────────
+    if args.db:
+        run_id = illiad_db.save_run(args.db, args, n_frames, frame_times,
+                                    atom_rows, group_rows, geometries)
+        print(f"Results saved to database: {args.db} (run_id = {run_id})")
     print("Done.")
 
 

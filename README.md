@@ -37,6 +37,7 @@ python src/illiad.py <file.pdb> -r <reference_residue> [options]
 - `-o, --output` — output file prefix (default: PDB filename without extension)
 - `--bin-width` — bin width in degrees for the angle and dihedral frequency histograms (default: 10)
 - `--dt` — time between frames in ps; frame *i* is at time *i*·dt and `-b`/`-e` use that time. Without it, the trajectory time is used, which for multi-model PDBs is MDAnalysis' 1 ps default (so `-b`/`-e` are effectively frame indices)
+- `--db` — SQLite file to also store the results in (created if missing); each run is added to it, so several runs can be compared (see [Database](#database))
 - `--all` — declared, but has no effect yet (see Limitations)
 
 ### Example
@@ -82,6 +83,37 @@ Lines with an atom count other than 3 (angle) or 4 (dihedral) are skipped with a
 If the bin width does not divide the range evenly, the last bin is narrower.
 
 The angle and dihedral files carry **two headers**: first `Angle_ID / Average / StdDev` (one line per angle), then `Frame Angle_0 Angle_1 ...` (one line per frame). When reading these files the two blocks must be handled separately.
+
+## Database
+With `--db <file>.db` the results are also stored in a SQLite database (code in `src/illiad_db.py`). The `.dat` files are still written. Running with the same file again adds a new run instead of overwriting:
+
+```bash
+python src/illiad.py teste_dados/teste.pdb -r SEH -g teste_dados/grupos.txt -d 3 -o teste_d3 --db illiad.db
+```
+
+Tables, all linked to `runs` by `run_id`:
+- **`runs`** — one row per run: input files, `-b`/`-e`, `-d`, `--dt`, `--bin-width`, number of frames processed and date
+- **`atom_distances`** / **`group_distances`** — the same columns as the `_H-dist_*.dat` files, plus `resname`
+- **`geometry_stats`** — mean and standard deviation of each angle (`kind = 'angle'`) and dihedral (`kind = 'dihedral'`), with the atoms that define it
+- **`geometry_series`** — value of each angle/dihedral frame by frame, with the frame time in ps
+- **`histograms`** — frequency of occurrence, the same data as the `_hist.dat` files
+
+Example queries:
+
+```sql
+-- runs stored so far
+SELECT id, pdb, max_dist, n_frames, created_at FROM runs;
+
+-- most frequent group contacts in run 2
+SELECT label1, label2, dist, frequency FROM group_distances
+WHERE run_id = 2 ORDER BY frequency DESC;
+
+-- frames in which angle 0 is between 100 and 140 degrees
+SELECT frame, time_ps, value FROM geometry_series
+WHERE run_id = 2 AND kind = 'angle' AND geom_id = 0 AND value BETWEEN 100 AND 140;
+```
+
+From Python or the notebook: `pd.read_sql("SELECT ...", sqlite3.connect("illiad.db"))`. To browse the tables without writing SQL, [DB Browser for SQLite](https://sqlitebrowser.org/) opens the file directly.
 
 ## Test data
 In `teste_dados/`:

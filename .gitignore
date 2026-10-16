@@ -5,4 +5,5 @@ __pycache__/
 # dados brutos e saidas de calculo (grandes demais para o GitHub)
 *.pdb
 *.dat
+*.db
 *.png
