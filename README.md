@@ -10,6 +10,7 @@ A Python rewrite of an equivalent tool originally written in C++ — the `.dat` 
 - Accumulates the mean, standard deviation and frequency of each atom pair across the frames
 - Groups chemically equivalent atoms (e.g. the hydrogens of a methyl) and computes the same statistics per group pair, when a groups file is provided
 - Computes angles (atom triplets) and dihedral angles (quadruplets), in degrees, frame by frame
+- Computes the frequency of occurrence of each angle and dihedral value (histogram)
 - Allows restricting the analysis to a time window and to a maximum distance
 
 ## Requirements
@@ -34,6 +35,8 @@ python src/illiad.py <file.pdb> -r <reference_residue> [options]
 - `-d, --max-dist` — maximum distance in Å; distances greater than or equal to the limit are discarded (default: -1, no limit)
 - `-g, --groups` — groups definition file
 - `-o, --output` — output file prefix (default: PDB filename without extension)
+- `--bin-width` — bin width in degrees for the angle and dihedral frequency histograms (default: 10)
+- `--dt` — time between frames in ps; frame *i* is at time *i*·dt and `-b`/`-e` use that time. Without it, the trajectory time is used, which for multi-model PDBs is MDAnalysis' 1 ps default (so `-b`/`-e` are effectively frame indices)
 - `--all` — declared, but has no effect yet (see Limitations)
 
 ### Example
@@ -73,6 +76,11 @@ Lines with an atom count other than 3 (angle) or 4 (dihedral) are skipped with a
 - **`<prefix>_angles.dat`** — mean and standard deviation of each angle, followed by a second block with each angle's value frame by frame
 - **`<prefix>_dihedrals.dat`** — the same, for the dihedrals
 
+- **`<prefix>_angles_hist.dat`** — frequency of occurrence of each angle: bins of `--bin-width` degrees from 0 to 180°, with the columns `Bin_start Bin_end Bin_center` followed by `Angle_<i>_count` and `Angle_<i>_freq(%)` for each angle
+- **`<prefix>_dihedrals_hist.dat`** — the same, for the dihedrals, with bins from −180 to 180°
+
+If the bin width does not divide the range evenly, the last bin is narrower.
+
 The angle and dihedral files carry **two headers**: first `Angle_ID / Average / StdDev` (one line per angle), then `Frame Angle_0 Angle_1 ...` (one line per frame). When reading these files the two blocks must be handled separately.
 
 ## Test data
@@ -88,4 +96,3 @@ In `teste_dados/`:
 - The `[energy]` section is recognized by the groups file parser, but no energy calculation has been implemented
 - No automated tests
 - Reads PDB only — other trajectory formats supported by MDAnalysis have not been tested
-- The distance loop walks every atom pair in Python; for large trajectories (such as `teste.pdb`) processing is slow
