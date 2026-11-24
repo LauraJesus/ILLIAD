@@ -4,7 +4,11 @@ import MDAnalysis as mda
 from MDAnalysis.lib.distances import calc_angles, calc_dihedrals
 from MDAnalysis.analysis import distances as mda_distances
 import argparse
+import warnings
 import illiad_db
+import dice_io
+
+# Comentários do código gerados com auxílio de IA (Claude, Anthropic) para facilitar a leitura por terceiros.
 
 def _is_atom_index(token):
     """Returns True if token is a pure integer (atom index)."""
@@ -157,7 +161,8 @@ def write_histogram(path, results, label, lo, hi, width):
 def main():
     parser = argparse.ArgumentParser(
         description="Calculate distances, angles, and dihedrals using MDAnalysis.")
-    parser.add_argument("pdb",                               help="Input PDB file")
+    parser.add_argument("pdb", nargs="?",
+                        help="Input PDB file (with --dice: topology only; not needed with --dice-txt)")
     parser.add_argument("-r", "--reference",   required=True, help="Reference residue name")
     parser.add_argument("-b", "--begin",       type=float, default=0,  help="Start time (ps)")
     parser.add_argument("-e", "--end",         type=float, default=-1, help="End time (ps)")
@@ -174,16 +179,65 @@ def main():
     parser.add_argument("--db",
                         help="SQLite file to also store the results in (created if missing; "
                              "each run is added to it)")
+    parser.add_argument("--dice", metavar="XYZ",
+                        help="DICE trajectory (outname.xyz). Coordinates come from it; atom and "
+                             "residue names come from the PDB, which must list the atoms in the "
+                             "same order as the DICE .txt. -b/-e are then configuration numbers")
+    parser.add_argument("--dice-txt", metavar="TXT",
+                        help="DICE .txt (ljname) to build the topology without a PDB "
+                             "(needs --nmol and --resnames)")
+    parser.add_argument("--nmol", type=int, nargs="+",
+                        help="Number of molecules of each type, in the .txt order (as in the DICE input)")
+    parser.add_argument("--resnames", nargs="+",
+                        help="Residue name for each molecule type, in the .txt order (e.g. CMB SEH WAT)")
+    parser.add_argument("--names-from", nargs="+", default=[], metavar="RES=PDB",
+                        help="Take the atom names of a molecule type from a PDB of one molecule "
+                             "(same atom order as the .txt), e.g. SEH=seh.pdb. "
+                             "Types without it get generated names (C1, H2, ...)")
     args = parser.parse_args()
 
     if args.bin_width <= 0:
         parser.error("--bin-width must be greater than 0")
     if args.dt is not None and args.dt <= 0:
         parser.error("--dt must be greater than 0")
+    if args.dice_txt:
+        if not args.dice:
+            parser.error("--dice-txt needs --dice (the DICE .xyz trajectory)")
+        if not args.nmol or not args.resnames:
+            parser.error("--dice-txt needs --nmol and --resnames")
+    elif not args.pdb:
+        parser.error("give a PDB file, or --dice with --dice-txt")
 
     # ── Load universe ──────────────────────────────────────────────────────────
-    u      = mda.Universe(args.pdb)
-    prefix = args.output if args.output else args.pdb.rsplit('.', 1)[0]
+    dice_steps = None
+    if args.dice:
+        if args.dt is not None:
+            parser.error("--dt cannot be used with --dice (frame time is the configuration number)")
+        if args.dice_txt:
+            try:
+                names_pdb = dict(item.split("=", 1) for item in args.names_from)
+            except ValueError:
+                parser.error("--names-from expects RES=file.pdb")
+            topology = dice_io.build_topology_from_txt(args.dice_txt, args.nmol,
+                                                       args.resnames, names_pdb)
+        else:
+            topology = args.pdb
+        u, dice_steps, _ = dice_io.load_dice_universe(topology, args.dice)
+    else:
+        u = mda.Universe(args.pdb)
+    source = args.pdb if args.pdb else args.dice
+    prefix = args.output if args.output else source.rsplit('.', 1)[0]
+
+    if args.dice_txt:
+        # topology built from the .txt, saved with the first configuration so the
+        # atom names can be checked (and used in the groups file)
+        top_path = f"{prefix}_dice_topology.pdb"
+        u.trajectory[0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            u.atoms.write(top_path)
+        print(f"Topology built from {args.dice_txt}: {len(u.atoms)} atoms, "
+              f"{len(u.residues)} molecules. Atom names saved in: {top_path}")
 
     # ── Parse groups ───────────────────────────────────────────────────────────
     configs = parse_groups_file(args.groups, u)
@@ -237,7 +291,10 @@ def main():
     angle_results   = [[] for _ in range(len(configs['angles']))]
     dihedral_results = [[] for _ in range(len(configs['dihedrals']))]
 
-    if args.dt is not None:
+    if dice_steps is not None:
+        print(f"DICE trajectory: {args.dice} (configurations {dice_steps[0]} to {dice_steps[-1]}); "
+              f"-b/-e are configuration numbers")
+    elif args.dt is not None:
         print(f"Frame time: frame index * {args.dt} ps (--dt)")
     else:
         print(f"Frame time: trajectory time (dt = {u.trajectory.dt} ps); "
@@ -248,7 +305,10 @@ def main():
     frame_times = []
 
     for ts in u.trajectory:
-        time = ts.frame * args.dt if args.dt is not None else ts.time
+        if dice_steps is not None:
+            time = dice_steps[ts.frame]
+        else:
+            time = ts.frame * args.dt if args.dt is not None else ts.time
         if time < args.begin:
             continue
         if args.end >= 0 and time > args.end:
